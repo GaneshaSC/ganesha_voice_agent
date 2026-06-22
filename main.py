@@ -63,101 +63,78 @@ async def stream(websocket: WebSocket):
     await websocket.accept()
     conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    print("WebSocket connected, waiting for media frames...")
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
             while True:
+                frame = await websocket.receive_text()
+                data = json.loads(frame)
+
+                if data.get("event") != "media":
+                    continue
+
+                stt_text = "Hello"
+                conversation.append({"role": "user", "content": stt_text})
+
+                # LLM call
                 try:
-                    frame = await websocket.receive_text()
-                    data = json.loads(frame)
+                    response = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENAI_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "gpt-4o-mini",
+                            "messages": conversation
+                        },
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    llm_response = response.json()
 
-                    if data.get("event") != "media":
-                        continue
-
-                    stt_text = "Hello"
-                    conversation.append({"role": "user", "content": stt_text})
-
-                    # LLM call
-                    try:
-                        print(f"Calling OpenAI LLM with {len(conversation)} messages...")
-                        response = await client.post(
-                            "https://api.openai.com/v1/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                                "Content-Type": "application/json"
-                            },
-                            json={
-                                "model": "gpt-4o-mini",
-                                "messages": conversation
-                            },
-                            timeout=30.0
-                        )
-                        response.raise_for_status()
-                        llm_response = response.json()
-                        print(f"LLM response: {llm_response}")
-
-                        if "error" in llm_response:
-                            print(f"OpenAI error: {llm_response['error']}")
-                            reply_text = "Error from API"
-                        elif "choices" in llm_response and llm_response["choices"]:
-                            reply_text = llm_response["choices"][0]["message"]["content"]
-                            print(f"LLM reply: {reply_text}")
-                        else:
-                            print(f"Invalid response structure: {llm_response}")
-                            reply_text = "Invalid response"
-
-                    except httpx.HTTPError as e:
-                        print(f"HTTP error: {e}")
-                        reply_text = "Connection error"
-                    except Exception as e:
-                        print(f"LLM error: {e}")
+                    if "error" in llm_response:
                         reply_text = "Error"
+                    elif "choices" in llm_response and llm_response["choices"]:
+                        reply_text = llm_response["choices"][0]["message"]["content"]
+                    else:
+                        reply_text = "No response"
 
-                    conversation.append({"role": "assistant", "content": reply_text})
-
-                    # TTS
-                    mulaw_audio = None
-                    try:
-                        print(f"Calling TTS for: {reply_text[:50]}...")
-                        tts_response = await client.post(
-                            "https://api.openai.com/v1/audio/speech",
-                            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                            json={
-                                "model": "tts-1",
-                                "input": reply_text,
-                                "voice": "alloy",
-                                "response_format": "pcm"
-                            },
-                            timeout=30.0
-                        )
-                        tts_response.raise_for_status()
-                        pcm_audio = tts_response.content
-                        mulaw_audio = pcm_to_mulaw(pcm_audio)
-                        print(f"TTS generated {len(mulaw_audio)} bytes of audio")
-                    except Exception as e:
-                        print(f"TTS error: {e}")
-                        mulaw_audio = b"\x00" * 320
-
-                    # Send audio in 20ms chunks (160 bytes)
-                    chunk_size = 160
-                    for i in range(0, len(mulaw_audio), chunk_size):
-                        chunk = mulaw_audio[i:i + chunk_size]
-                        chunk_b64 = base64.b64encode(chunk).decode("utf-8")
-                        
-                        await websocket.send_text(json.dumps({
-                            "event": "media",
-                            "media": {"payload": chunk_b64}
-                        }))
-                    
-                    print(f"Sent {len(mulaw_audio) // chunk_size} audio chunks")
-
-                except json.JSONDecodeError as e:
-                    print(f"JSON decode error: {e}")
                 except Exception as e:
-                    print(f"Frame processing error: {e}")
+                    reply_text = "Error"
 
-    except Exception as e:
-        print(f"WebSocket closed: {e}")
-        await websocket.close()
+                conversation.append({"role": "assistant", "content": reply_text})
+
+                # TTS
+                mulaw_audio = None
+                try:
+                    tts_response = await client.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                        json={
+                            "model": "tts-1",
+                            "input": reply_text,
+                            "voice": "alloy",
+                            "response_format": "pcm"
+                        },
+                        timeout=30.0
+                    )
+                    tts_response.raise_for_status()
+                    pcm_audio = tts_response.content
+                    mulaw_audio = pcm_to_mulaw(pcm_audio)
+                except Exception:
+                    mulaw_audio = b"\x00" * 320
+
+                # Send audio in 20ms chunks (160 bytes)
+                chunk_size = 160
+                for i in range(0, len(mulaw_audio), chunk_size):
+                    chunk = mulaw_audio[i:i + chunk_size]
+                    chunk_b64 = base64.b64encode(chunk).decode("utf-8")
+                    
+                    await websocket.send_text(json.dumps({
+                        "event": "media",
+                        "media": {"payload": chunk_b64}
+                    }))
+
+        except Exception as e:
+            await websocket.close()
 
