@@ -96,15 +96,17 @@ async def stream(websocket: WebSocket):
 
                     if "choices" in llm_response and llm_response["choices"]:
                         reply_text = llm_response["choices"][0]["message"]["content"]
+                        print(f"LLM: {reply_text[:50]}")
 
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"LLM error: {e}")
 
                 conversation.append({"role": "assistant", "content": reply_text})
 
                 # TTS
-                mulaw_audio = b"\x00" * 320
+                mulaw_audio = None
                 try:
+                    print(f"TTS request for: {reply_text[:30]}")
                     tts_response = await client.post(
                         "https://api.openai.com/v1/audio/speech",
                         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
@@ -118,12 +120,17 @@ async def stream(websocket: WebSocket):
                     )
                     tts_response.raise_for_status()
                     pcm_audio = tts_response.content
+                    print(f"TTS got {len(pcm_audio)} bytes PCM")
                     mulaw_audio = pcm_to_mulaw(pcm_audio)
-                except Exception:
-                    pass
+                    print(f"Converted to {len(mulaw_audio)} bytes µ-law")
+
+                except Exception as e:
+                    print(f"TTS error: {e}")
+                    mulaw_audio = b"\x00" * 320
 
                 # Send audio in 20ms chunks (160 bytes) with minimal delay
                 chunk_size = 160
+                chunks_sent = 0
                 for i in range(0, len(mulaw_audio), chunk_size):
                     try:
                         chunk = mulaw_audio[i:i + chunk_size]
@@ -133,12 +140,15 @@ async def stream(websocket: WebSocket):
                             "event": "media",
                             "media": {"payload": chunk_b64}
                         }))
+                        chunks_sent += 1
                         
                         # Small delay between chunks to match 20ms timing
                         await asyncio.sleep(0.02)
                     except Exception:
                         break
+                
+                print(f"Sent {chunks_sent} audio chunks")
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Stream error: {e}")
 
