@@ -2,6 +2,7 @@ import json
 import os
 import base64
 import httpx
+import asyncio
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
 
@@ -76,6 +77,7 @@ async def stream(websocket: WebSocket):
                 conversation.append({"role": "user", "content": stt_text})
 
                 # LLM call
+                reply_text = "Error"
                 try:
                     response = await client.post(
                         "https://api.openai.com/v1/chat/completions",
@@ -92,20 +94,16 @@ async def stream(websocket: WebSocket):
                     response.raise_for_status()
                     llm_response = response.json()
 
-                    if "error" in llm_response:
-                        reply_text = "Error"
-                    elif "choices" in llm_response and llm_response["choices"]:
+                    if "choices" in llm_response and llm_response["choices"]:
                         reply_text = llm_response["choices"][0]["message"]["content"]
-                    else:
-                        reply_text = "No response"
 
-                except Exception as e:
-                    reply_text = "Error"
+                except Exception:
+                    pass
 
                 conversation.append({"role": "assistant", "content": reply_text})
 
                 # TTS
-                mulaw_audio = None
+                mulaw_audio = b"\x00" * 320
                 try:
                     tts_response = await client.post(
                         "https://api.openai.com/v1/audio/speech",
@@ -122,19 +120,25 @@ async def stream(websocket: WebSocket):
                     pcm_audio = tts_response.content
                     mulaw_audio = pcm_to_mulaw(pcm_audio)
                 except Exception:
-                    mulaw_audio = b"\x00" * 320
+                    pass
 
-                # Send audio in 20ms chunks (160 bytes)
+                # Send audio in 20ms chunks (160 bytes) with minimal delay
                 chunk_size = 160
                 for i in range(0, len(mulaw_audio), chunk_size):
-                    chunk = mulaw_audio[i:i + chunk_size]
-                    chunk_b64 = base64.b64encode(chunk).decode("utf-8")
-                    
-                    await websocket.send_text(json.dumps({
-                        "event": "media",
-                        "media": {"payload": chunk_b64}
-                    }))
+                    try:
+                        chunk = mulaw_audio[i:i + chunk_size]
+                        chunk_b64 = base64.b64encode(chunk).decode("utf-8")
+                        
+                        await websocket.send_text(json.dumps({
+                            "event": "media",
+                            "media": {"payload": chunk_b64}
+                        }))
+                        
+                        # Small delay between chunks to match 20ms timing
+                        await asyncio.sleep(0.02)
+                    except Exception:
+                        break
 
-        except Exception as e:
-            await websocket.close()
+        except Exception:
+            pass
 
