@@ -1,20 +1,22 @@
 import json
 import os
 import base64
-import requests
+import httpx
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import Response
 
 app = FastAPI()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY environment variable is required")
 
-with open(SYSTEM_PROMPT_PATH, "r") as f:
+SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
+with open(SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
     SYSTEM_PROMPT = f.read()
 
 
-@app.post("/voice", response_class=PlainTextResponse)
+@app.post("/voice")
 async def voice(request: Request):
     domain = request.url.hostname
     twiml = f"""
@@ -24,7 +26,7 @@ async def voice(request: Request):
   </Connect>
 </Response>
 """.strip()
-    return twiml
+    return Response(content=twiml, media_type="text/xml")
 
 
 @app.websocket("/stream")
@@ -54,11 +56,17 @@ async def stream(websocket: WebSocket):
                 "messages": conversation
             }
 
-            llm_response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json=llm_payload
-            ).json()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENAI_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json=llm_payload
+                )
+                response.raise_for_status()
+                llm_response = response.json()
 
             reply_text = llm_response["choices"][0]["message"]["content"]
             conversation.append({"role": "assistant", "content": reply_text})
