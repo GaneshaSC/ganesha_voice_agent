@@ -4,7 +4,6 @@ import base64
 import httpx
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
-import io
 
 app = FastAPI()
 
@@ -39,7 +38,7 @@ async def text_to_speech(text: str, client: httpx.AsyncClient) -> bytes:
             "model": "tts-1",
             "input": text,
             "voice": "alloy",
-            "response_format": "pcm"  # Raw PCM audio
+            "response_format": "pcm"
         }
     )
     response.raise_for_status()
@@ -50,13 +49,11 @@ def pcm_to_mulaw(pcm_data: bytes) -> bytes:
     """Convert 16-bit PCM to 8-bit µ-law (Twilio format)."""
     import array
     
-    # Unpack PCM as 16-bit signed integers (little-endian)
     pcm_array = array.array('h')
     pcm_array.frombytes(pcm_data)
     
     mulaw_data = bytearray()
     for sample in pcm_array:
-        # µ-law encoding
         sign = 0x80 if sample < 0 else 0x00
         sample = abs(sample)
         
@@ -91,43 +88,62 @@ async def stream(websocket: WebSocket):
                 if data.get("event") != "media":
                     continue
 
-                # No STT → placeholder text
                 stt_text = "Hello"
-
                 conversation.append({"role": "user", "content": stt_text})
 
-                # LLM call
-                llm_payload = {
-                    "model": "gpt-4o-mini",
-                    "messages": conversation
-                }
+                # LLM call with error handling
+                try:
+                    llm_payload = {
+                        "model": "gpt-4o-mini",
+                        "messages": conversation
+                    }
 
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json=llm_payload
-                )
-                response.raise_for_status()
-                llm_response = response.json()
+                    response = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENAI_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
+                        json=llm_payload,
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    llm_response = response.json()
 
-                reply_text = llm_response["choices"][0]["message"]["content"]
+                    # Check for API errors
+                    if "error" in llm_response:
+                        print(f"OpenAI API error: {llm_response['error']}")
+                        reply_text = "Sorry, I encountered an error. Please try again."
+                    elif "choices" not in llm_response or not llm_response["choices"]:
+                        print(f"Invalid LLM response: {llm_response}")
+                        reply_text = "Sorry, I didn't get a valid response. Please try again."
+                    else:
+                        reply_text = llm_response["choices"][0]["message"]["content"]
+
+                except httpx.HTTPError as e:
+                    print(f"HTTP error during LLM call: {e}")
+                    reply_text = "Sorry, I'm having trouble connecting. Please try again."
+                except Exception as e:
+                    print(f"Error during LLM call: {e}")
+                    reply_text = "Sorry, something went wrong. Please try again."
+
                 conversation.append({"role": "assistant", "content": reply_text})
 
                 # Generate speech from reply
+                mulaw_audio = None
                 try:
                     pcm_audio = await text_to_speech(reply_text, client)
                     mulaw_audio = pcm_to_mulaw(pcm_audio)
-                    audio_b64 = base64.b64encode(mulaw_audio).decode("utf-8")
-                except Exception as tts_error:
-                    print(f"TTS error: {tts_error}")
-                    # Fallback to silence if TTS fails
-                    audio_b64 = base64.b64encode(b"\x00" * 320).decode("utf-8")
+                except httpx.HTTPError as e:
+                    print(f"HTTP error during TTS: {e}")
+                    # Send silence on TTS error
+                    mulaw_audio = b"\x00" * 320
+                except Exception as e:
+                    print(f"TTS error: {e}")
+                    # Send silence on TTS error
+                    mulaw_audio = b"\x00" * 320
 
-                # Send audio frames to Twilio
-                # Split audio into 20ms chunks (160 bytes at 8kHz µ-law)
+                # Send audio frames to Twilio in 20ms chunks (160 bytes)
                 chunk_size = 160
                 for i in range(0, len(mulaw_audio), chunk_size):
                     chunk = mulaw_audio[i:i + chunk_size]
@@ -139,6 +155,6 @@ async def stream(websocket: WebSocket):
                     }))
 
     except Exception as e:
-        print("Stream closed:", e)
+        print(f"Stream closed: {e}")
         await websocket.close()
 
