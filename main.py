@@ -109,7 +109,10 @@ async def stream(websocket: WebSocket):
                     print(f"TTS request for: {reply_text[:30]}")
                     tts_response = await client.post(
                         "https://api.openai.com/v1/audio/speech",
-                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                        headers={
+                            "Authorization": f"Bearer {OPENAI_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
                         json={
                             "model": "tts-1",
                             "input": reply_text,
