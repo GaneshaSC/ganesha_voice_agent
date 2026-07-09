@@ -12,6 +12,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY environment variable is required")
 
+print(f"DEBUG: API Key loaded, first 10 chars: {OPENAI_API_KEY[:10]}")
+
 SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "system_prompt.txt")
 with open(SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
     SYSTEM_PROMPT = f.read()
@@ -79,6 +81,7 @@ async def stream(websocket: WebSocket):
                 # LLM call
                 reply_text = "Error"
                 try:
+                    print(f"DEBUG: Calling LLM with key: {OPENAI_API_KEY[:10]}...")
                     response = await client.post(
                         "https://api.openai.com/v1/chat/completions",
                         headers={
@@ -91,6 +94,7 @@ async def stream(websocket: WebSocket):
                         },
                         timeout=30.0
                     )
+                    print(f"DEBUG: LLM response status: {response.status_code}")
                     response.raise_for_status()
                     llm_response = response.json()
 
@@ -107,6 +111,7 @@ async def stream(websocket: WebSocket):
                 mulaw_audio = None
                 try:
                     print(f"TTS request for: {reply_text[:30]}")
+                    print(f"DEBUG: Calling TTS with key: {OPENAI_API_KEY[:10]}...")
                     tts_response = await client.post(
                         "https://api.openai.com/v1/audio/speech",
                         headers={
@@ -121,6 +126,7 @@ async def stream(websocket: WebSocket):
                         },
                         timeout=30.0
                     )
+                    print(f"DEBUG: TTS response status: {tts_response.status_code}")
                     tts_response.raise_for_status()
                     pcm_audio = tts_response.content
                     print(f"TTS got {len(pcm_audio)} bytes PCM")
